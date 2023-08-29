@@ -1,0 +1,25 @@
+[package]
+name = "swish"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = ["gen_pay_ref"]
+gen_pay_ref = ["dep:uuid"]
+
+[dependencies]
+url = { version = '2.4.0', features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+rustls = "0.21.6"
+rustls-pemfile = "1.0.3"
+reqwest = { version = "0.11", features = ["json", "native-tls", "rustls-tls"] }
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1.4.1", features = ["v4"], optional = true }
+time = {version = "0.3", features = ["serde", "formatting", "parsing"] }
+
+# serde_json is just for the example, not required in general
+serde_json = "1.0"
+[dev-dependencies]
+axum = "0.6"
+ngrok = { version = "0.13", features = ["axum"] }
