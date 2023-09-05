@@ -2,11 +2,9 @@ use crate::CallbackUrlError::{UrlParseError, UrlSchemeNotHttps};
 use crate::CreatePaymentRequestError::{
     CertMismatch, HttpError, ServerError, Unauthorized, ValidationError,
 };
-use crate::CreatePaymentRequestError::{
-    CertMismatch, HttpError, ServerError, Unauthorized, ValidationError,
-};
 use reqwest::{Client, StatusCode};
 use rustls::{Certificate, PrivateKey};
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use url::{ParseError, Url};
 
