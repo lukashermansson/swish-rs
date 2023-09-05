@@ -1,10 +1,14 @@
+use crate::CallbackUrlError::{UrlParseError, UrlSchemeNotHttps};
+use crate::CreatePaymentRequestError::{
+    CertMismatch, HttpError, ServerError, Unauthorized, ValidationError,
+};
+use crate::CreatePaymentRequestError::{
+    CertMismatch, HttpError, ServerError, Unauthorized, ValidationError,
+};
 use reqwest::{Client, StatusCode};
 use rustls::{Certificate, PrivateKey};
-use serde::{Deserialize, Serialize};
-use time::{OffsetDateTime };
+use time::OffsetDateTime;
 use url::{ParseError, Url};
-use crate::CallbackUrlError::{UrlParseError, UrlSchemeNotHttps};
-use crate::CreatePaymentRequestError::{CertMismatch, HttpError, ServerError, Unauthorized, ValidationError};
 
 fn load_certs(filename: &str) -> Vec<Certificate> {
     let certfile = std::fs::File::open(filename).expect("cannot open certificate file");
@@ -39,12 +43,12 @@ fn load_private_key(filename: &str) -> PrivateKey {
 pub struct Swish {
     base: String,
     client: Client,
-    payee_alias: String
+    payee_alias: String,
 }
 
 pub struct SwishCertificate {
     certs: Vec<Certificate>,
-    key: PrivateKey
+    key: PrivateKey,
 }
 /// Represents the client certificate to be sent to swish
 impl SwishCertificate {
@@ -55,15 +59,16 @@ impl SwishCertificate {
     pub fn from_der(key_path: &str, chain: &str) -> Self {
         Self {
             certs: load_certs(chain),
-            key: load_private_key(key_path)
+            key: load_private_key(key_path),
         }
     }
 }
 impl Swish {
     pub fn build(base: String, cert: SwishCertificate, payee_alias: String) -> Self {
         let mut root_cert_store = rustls::RootCertStore::empty();
-        root_cert_store.add(load_certs("Swish_TLS_RootCA.pem").first().unwrap()).unwrap();
-
+        root_cert_store
+            .add(load_certs("Swish_TLS_RootCA.pem").first().unwrap())
+            .unwrap();
 
         let tls = rustls::ClientConfig::builder()
             .with_safe_default_cipher_suites()
@@ -78,6 +83,7 @@ impl Swish {
             .use_preconfigured_tls(tls)
             .build()
             .unwrap();
+
         Self {
             base,
             client,
@@ -85,9 +91,17 @@ impl Swish {
         }
     }
 
-    pub async fn create_payment_request(&self, instruction_uuid: String, request: PaymentRequestMCommerceParams) -> Result<PaymentResponseMCommerce, CreatePaymentRequestError> {
-        let req  = self.client
-            .put(format!("{}/api/v2/paymentrequests/{}", self.base, instruction_uuid))
+    pub async fn create_payment_request(
+        &self,
+        instruction_uuid: String,
+        request: PaymentRequestMCommerceParams,
+    ) -> Result<PaymentResponseMCommerce, CreatePaymentRequestError> {
+        let req = self
+            .client
+            .put(format!(
+                "{}/api/v2/paymentrequests/{}",
+                self.base, instruction_uuid
+            ))
             .json(&PaymentRequest {
                 payee_alias: &self.payee_alias,
                 amount: request.amount,
@@ -105,18 +119,31 @@ impl Swish {
                 let headers = req.headers();
 
                 return Ok(PaymentResponseMCommerce {
-                    location: headers["Location"].to_str().unwrap().to_string().parse().unwrap(),
-                    payment_request_token: headers["PaymentRequestToken"].to_str().unwrap().to_string(),
-                })
+                    location: headers["Location"]
+                        .to_str()
+                        .unwrap()
+                        .to_string()
+                        .parse()
+                        .unwrap(),
+                    payment_request_token: headers["PaymentRequestToken"]
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
+                });
             }
             StatusCode::UNAUTHORIZED => Err(Unauthorized),
             StatusCode::FORBIDDEN => Err(CertMismatch),
             StatusCode::INTERNAL_SERVER_ERROR => Err(ServerError),
             StatusCode::UNPROCESSABLE_ENTITY => {
-                let res = req.json::<Vec<CreatePaymentRequestErrorResponse>>().await.map_err(HttpError)?;
-                Err(ValidationError(res.into_iter().map(|f| f.error_code).collect()))
-            },
-            _ => panic!("unexpected status code")
+                let res = req
+                    .json::<Vec<CreatePaymentRequestErrorResponse>>()
+                    .await
+                    .map_err(HttpError)?;
+                Err(ValidationError(
+                    res.into_iter().map(|f| f.error_code).collect(),
+                ))
+            }
+            _ => panic!("unexpected status code"),
         }
     }
 }
@@ -124,7 +151,7 @@ impl Swish {
 #[serde(rename_all = "camelCase")]
 #[derive(Debug)]
 struct CreatePaymentRequestErrorResponse {
-    error_code: ApiError
+    error_code: ApiError,
 }
 #[derive(Debug)]
 pub enum CreatePaymentRequestError {
@@ -140,7 +167,10 @@ pub enum CreatePaymentRequestError {
 /// Because Swish is super picky about the payment id format, a helper method is optionality provided to use
 #[cfg(feature = "gen_pay_ref")]
 pub fn generate_payment_reference() -> String {
-    uuid::Uuid::new_v4().to_string().replace('-', "").to_uppercase()
+    uuid::Uuid::new_v4()
+        .to_string()
+        .replace('-', "")
+        .to_uppercase()
 }
 
 pub struct PaymentRequestMCommerceParams {
@@ -148,7 +178,7 @@ pub struct PaymentRequestMCommerceParams {
     currency: Currency,
     callback_url: CallbackUrl,
     payee_payment_reference: String,
-    message: String
+    message: String,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -158,7 +188,7 @@ struct PaymentRequest<'a> {
     currency: Currency,
     callback_url: CallbackUrl,
     payee_payment_reference: String,
-    message: String
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -166,7 +196,7 @@ struct PaymentRequest<'a> {
 #[derive(Debug)]
 pub struct PaymentResponseMCommerce {
     location: Url,
-    payment_request_token: String
+    payment_request_token: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -175,12 +205,10 @@ pub struct CallbackUrl(Url);
 
 impl CallbackUrl {
     pub fn new(value: String) -> Result<CallbackUrl, CallbackUrlError> {
-        let url = Url::parse(
-            &value
-        ).map_err(UrlParseError)?;
+        let url = Url::parse(&value).map_err(UrlParseError)?;
 
         if url.scheme() != "https" {
-            return Err(UrlSchemeNotHttps)
+            return Err(UrlSchemeNotHttps);
         }
         Ok(CallbackUrl(url))
     }
@@ -198,13 +226,13 @@ pub struct PaymentAmount(f64);
 impl PaymentAmount {
     pub fn from(whole: u64, part: u8) -> Option<PaymentAmount> {
         if part > 99 {
-            return None
+            return None;
         }
         if whole > 999999999999 {
-            return None
+            return None;
         }
         if whole == 0 && part == 0 {
-            return None
+            return None;
         }
         Some(PaymentAmount(((whole * 100 + part as u64) / 100) as f64))
     }
@@ -213,7 +241,7 @@ impl PaymentAmount {
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Currency {
-    Sek
+    Sek,
 }
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "UPPERCASE")]
@@ -223,7 +251,6 @@ pub enum Status {
     Declined,
     Pending,
 }
-
 #[derive(Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CallbackResponse {
@@ -242,7 +269,7 @@ pub struct CallbackResponse {
     #[serde(with = "time::serde::iso8601::option")]
     date_paid: Option<OffsetDateTime>,
     error_code: Option<ApiError>,
-    error_message: Option<String>
+    error_message: Option<String>,
 }
 
 /// all possible error codes
@@ -275,34 +302,47 @@ pub enum ApiError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::Status::Paid;
+    use axum::routing::post;
     use axum::{extract, Router};
-    use axum::routing::{post};
     use ngrok::config::TunnelBuilder;
     use ngrok::tunnel::UrlTunnel;
     use tokio::sync::mpsc::channel;
-    use crate::Status::Paid;
-    use super::*;
 
     async fn get_client_for_test() -> Swish {
-        Swish::build("https://mss.cpc.getswish.net/swish-cpcapi".into(),
-                     SwishCertificate::from_der("Swish_Merchant_TestCertificate_1234679304.key",
-                                                "Swish_Merchant_TestCertificate_1234679304.pem"),
-                     "1234679304".to_string())
+        Swish::build(
+            "https://mss.cpc.getswish.net/swish-cpcapi".into(),
+            SwishCertificate::from_der(
+                "Swish_Merchant_TestCertificate_1234679304.key",
+                "Swish_Merchant_TestCertificate_1234679304.pem",
+            ),
+            "1234679304".to_string(),
+        )
     }
 
     #[tokio::test]
     async fn it_works() {
         let uuid = generate_payment_reference();
         let swish = get_client_for_test().await;
-        let res = swish.create_payment_request(uuid, PaymentRequestMCommerceParams {
-            amount: PaymentAmount::from(100, 00).unwrap(),
-            currency: Currency::Sek,
-            callback_url: CallbackUrl::new("https://localhost/test".to_string()).unwrap(),
-            payee_payment_reference: "eee".to_string(),
-            message: "eee".to_string(),
-        }).await.unwrap();
+        let res = swish
+            .create_payment_request(
+                uuid,
+                PaymentRequestMCommerceParams {
+                    amount: PaymentAmount::from(100, 00).unwrap(),
+                    currency: Currency::Sek,
+                    callback_url: CallbackUrl::new("https://localhost/test".to_string()).unwrap(),
+                    payee_payment_reference: "eee".to_string(),
+                    message: "eee".to_string(),
+                },
+            )
+            .await
+            .unwrap();
 
-        assert_eq!(res.location.host().unwrap().to_string(), "mss.cpc.getswish.net");
+        assert_eq!(
+            res.location.host().unwrap().to_string(),
+            "mss.cpc.getswish.net"
+        );
         assert!(!res.payment_request_token.is_empty());
     }
     // This sort of testes the simulator, but we use it to make sure we can parse the error response
@@ -310,15 +350,22 @@ mod tests {
     async fn it_errors() {
         let uuid = generate_payment_reference();
         let swish = get_client_for_test().await;
-        let res = swish.create_payment_request(uuid, PaymentRequestMCommerceParams {
-            amount: PaymentAmount::from(100, 00).unwrap(),
-            currency: Currency::Sek,
-            callback_url: CallbackUrl::new("https://localhost/test".to_string()).unwrap(),
-            payee_payment_reference: "eee".to_string(),
-            message: "ACMT03".to_string(),
-        }).await;
+        let res = swish
+            .create_payment_request(
+                uuid,
+                PaymentRequestMCommerceParams {
+                    amount: PaymentAmount::from(100, 00).unwrap(),
+                    currency: Currency::Sek,
+                    callback_url: CallbackUrl::new("https://localhost/test".to_string()).unwrap(),
+                    payee_payment_reference: "eee".to_string(),
+                    message: "ACMT03".to_string(),
+                },
+            )
+            .await;
 
-        let Err(ValidationError(e)) = res else { panic!("should error"); };
+        let Err(ValidationError(e)) = res else {
+            panic!("should error");
+        };
 
         assert_eq!(e.iter().next(), Some(&ApiError::ACMT03));
     }
@@ -330,33 +377,42 @@ mod tests {
         let (sender, mut receiver) = channel(100);
         let join_handle = tokio::spawn(async move {
             let (tx, mut rx) = channel(1);
-            let app = Router::new().route("/", post(|extract::Json(payload) : extract::Json<CallbackResponse>| async move {
-                tx.send(()).await.unwrap();
+            let app = Router::new().route(
+                "/",
+                post(
+                    |extract::Json(payload): extract::Json<CallbackResponse>| async move {
+                        tx.send(()).await.unwrap();
 
-                // this will just panic a runtime thread of axum, so not ideal for asserting this stuff
-                assert_eq!(payload.error_code, None);
-                assert_eq!(payload.status, Paid);
-                assert_eq!(payload.message, "eee");
-                assert_eq!(payload.currency, Currency::Sek);
-                assert_eq!(payload.payee_payment_reference, "eee");
-                assert!(payload.date_paid.is_some());
-                assert_eq!(payload.error_message, None);
+                        // this will just panic a runtime thread of axum, so not ideal for asserting this stuff
+                        assert_eq!(payload.error_code, None);
+                        assert_eq!(payload.status, Paid);
+                        assert_eq!(payload.message, "eee");
+                        assert_eq!(payload.currency, Currency::Sek);
+                        assert_eq!(payload.payee_payment_reference, "eee");
+                        assert!(payload.date_paid.is_some());
+                        assert_eq!(payload.error_message, None);
 
-                // just send this to swish to thank the server for all the hard work
-                "good job, swish!"
-            }));
+                        // just send this to swish to thank the server for all the hard work
+                        "good job, swish!"
+                    },
+                ),
+            );
 
             let listener = ngrok::Session::builder()
                 .authtoken_from_env()
                 .connect()
-                .await.unwrap()
+                .await
+                .unwrap()
                 .http_endpoint()
                 .listen()
-                .await.unwrap();
+                .await
+                .unwrap();
             sender.send(listener.url().to_string()).await.unwrap();
             axum::Server::builder(listener)
                 .serve(app.into_make_service())
-                .with_graceful_shutdown(async { rx.recv().await.unwrap(); })
+                .with_graceful_shutdown(async {
+                    rx.recv().await.unwrap();
+                })
                 .await
                 .unwrap();
         });
@@ -367,16 +423,21 @@ mod tests {
                 Some(url) => {
                     let uuid = generate_payment_reference();
                     let swish = get_client_for_test().await;
-                    swish.create_payment_request(uuid, PaymentRequestMCommerceParams {
-                        amount: PaymentAmount::from(100, 00).unwrap(),
-                        currency: Currency::Sek,
-                        callback_url: CallbackUrl::new(url).unwrap(),
-                        payee_payment_reference: "eee".to_string(),
-                        message: "eee".to_string(),
-                    }).await.unwrap();
+                    swish
+                        .create_payment_request(
+                            uuid,
+                            PaymentRequestMCommerceParams {
+                                amount: PaymentAmount::from(100, 00).unwrap(),
+                                currency: Currency::Sek,
+                                callback_url: CallbackUrl::new(url).unwrap(),
+                                payee_payment_reference: "eee".to_string(),
+                                message: "eee".to_string(),
+                            },
+                        )
+                        .await
+                        .unwrap();
                 }
             }
-
         });
         tokio::try_join!(join_handle, send_handle).unwrap();
     }
