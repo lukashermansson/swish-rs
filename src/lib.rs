@@ -4,66 +4,86 @@ use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime };
 use url::{ParseError, Url};
 use crate::CallbackUrlError::{UrlParseError, UrlSchemeNotHttps};
-use crate::CreatePaymentRequestError::{CertMismatch, HttpError, ServerError, Unauthorized, ValidationError};
 
-fn load_certs(filename: &str) -> Vec<Certificate> {
-    let certfile = std::fs::File::open(filename).expect("cannot open certificate file");
-    let mut reader = std::io::BufReader::new(certfile);
-    rustls_pemfile::certs(&mut reader)
-        .unwrap()
-        .iter()
-        .map(|v| Certificate(v.clone()))
-        .collect()
-}
-
-fn load_private_key(filename: &str) -> PrivateKey {
-    let keyfile = std::fs::File::open(filename).expect("cannot open private key file");
-    let mut reader = std::io::BufReader::new(keyfile);
-
-    loop {
-        match rustls_pemfile::read_one(&mut reader).expect("cannot parse private key .pem file") {
-            Some(rustls_pemfile::Item::RSAKey(key)) => return rustls::PrivateKey(key),
-            Some(rustls_pemfile::Item::PKCS8Key(key)) => return rustls::PrivateKey(key),
-            Some(rustls_pemfile::Item::ECKey(key)) => return rustls::PrivateKey(key),
-            None => break,
-            _ => {}
-        }
-    }
-
-    panic!(
-        "no keys found in {:?} (encrypted keys not supported)",
-        filename
-    );
-}
-
+/// The swish client, can be constructed using the [`Self::build`] function
+///
+/// It verifies the server signature on each request against the provided server certificate.
+/// It encapsulates an authentication method and the `payee_alias`, letting you configure it once
+/// and reusing the client to perform multiple requests before disposing of the client
 pub struct Swish {
     base: String,
     client: Client,
     payee_alias: String
 }
 
+/// Represents the client certificate to be sent to swish,
+/// its set up in a way where you decide for yourself how you load the certificates.
+/// One approach is to load them from disk using the `rustls-pemfile` crate.
 pub struct SwishCertificate {
     certs: Vec<Certificate>,
     key: PrivateKey
 }
-/// Represents the client certificate to be sent to swish
 impl SwishCertificate {
-    /// given file paths, this will load the given files
-    ///
-    /// the files need to be in der encoded format,
-    /// witch are supplied by swish, (the .key and the .pem supplied)
-    pub fn from_der(key_path: &str, chain: &str) -> Self {
+    pub fn from_der(key: PrivateKey, chain: Vec<Certificate>) -> Self {
         Self {
-            certs: load_certs(chain),
-            key: load_private_key(key_path)
+            certs: chain,
+            key
         }
     }
 }
-impl Swish {
-    pub fn build(base: String, cert: SwishCertificate, payee_alias: String) -> Self {
-        let mut root_cert_store = rustls::RootCertStore::empty();
-        root_cert_store.add(load_certs("Swish_TLS_RootCA.pem").first().unwrap()).unwrap();
 
+
+impl Swish {
+    /// builds a swish client
+    ///
+    /// This shows how you can build a client.
+    ///
+    /// ```
+    /// # use rustls::{Certificate, PrivateKey};
+    /// #   fn load_certs(filename: &str) -> Vec<Certificate> {
+    /// #     let certfile = std::fs::File::open(filename).expect("cannot open certificate file");
+    /// #     let mut reader = std::io::BufReader::new(certfile);
+    /// #     rustls_pemfile::certs(&mut reader)
+    /// #         .unwrap()
+    /// #         .iter()
+    /// #         .map(|v| Certificate(v.clone()))
+    /// #         .collect()
+    /// #   }
+    /// #
+    /// #   fn load_private_key(filename: &str) -> PrivateKey {
+    /// #     let keyfile = std::fs::File::open(filename).expect("cannot open private key file");
+    /// #     let mut reader = std::io::BufReader::new(keyfile);
+    /// #
+    /// #     loop {
+    /// #         match rustls_pemfile::read_one(&mut reader).expect("cannot parse private key .pem file") {
+    /// #             Some(rustls_pemfile::Item::RSAKey(key)) => return rustls::PrivateKey(key),
+    /// #             Some(rustls_pemfile::Item::PKCS8Key(key)) => return rustls::PrivateKey(key),
+    /// #             Some(rustls_pemfile::Item::ECKey(key)) => return rustls::PrivateKey(key),
+    /// #             None => break,
+    /// #             _ => {}
+    /// #         }
+    /// #     }
+    /// #
+    /// #     panic!(
+    /// #         "no keys found in {:?} (encrypted keys not supported)",
+    /// #         filename);
+    /// #     }
+    /// #
+    /// #     async fn load_cert_from_disk() -> swish::SwishCertificate {
+    /// #         swish::SwishCertificate::from_der(load_private_key("Swish_Merchant_TestCertificate_1234679304.key"), load_certs("Swish_Merchant_TestCertificate_1234679304.pem"))
+    /// #     }
+    /// #     let server_cert = load_certs("Swish_TLS_RootCA.pem").into_iter().next().expect("The provided root ca should have a cert");
+    /// # tokio_test::block_on(async {
+    /// let private_cert = load_cert_from_disk().await; // load your certs in your own way, its not included in this lib
+    /// let swish_client = swish::Swish::build("https://mss.cpc.getswish.net/swish-cpcapi",
+    ///                 private_cert,
+    ///                 &server_cert,
+    ///                 "1234679304");
+    /// # });
+    /// ```
+    pub fn build(api_url_base: impl Into<String>, cert: SwishCertificate, swish_server_cert: &Certificate, payee_alias: impl Into<String>) -> Self {
+        let mut root_cert_store = rustls::RootCertStore::empty();
+        root_cert_store.add(swish_server_cert).unwrap();
 
         let tls = rustls::ClientConfig::builder()
             .with_safe_default_cipher_suites()
@@ -79,13 +99,65 @@ impl Swish {
             .build()
             .unwrap();
         Self {
-            base,
+            base: api_url_base.into(),
             client,
-            payee_alias,
+            payee_alias: payee_alias.into(),
         }
     }
 
-    pub async fn create_payment_request(&self, instruction_uuid: String, request: PaymentRequestMCommerceParams) -> Result<PaymentResponseMCommerce, CreatePaymentRequestError> {
+    /// Creates M-Commerce payment request
+    /// ```
+    /// #   fn load_certs(filename: &str) -> Vec<rustls::Certificate> {
+    /// #     let certfile = std::fs::File::open(filename).expect("cannot open certificate file");
+    /// #     let mut reader = std::io::BufReader::new(certfile);
+    /// #     rustls_pemfile::certs(&mut reader)
+    /// #         .unwrap()
+    /// #         .iter()
+    /// #         .map(|v| rustls::Certificate(v.clone()))
+    /// #         .collect()
+    /// #     }
+    /// #
+    /// #   fn load_private_key(filename: &str) -> rustls::PrivateKey {
+    /// #     let keyfile = std::fs::File::open(filename).expect("cannot open private key file");
+    /// #     let mut reader = std::io::BufReader::new(keyfile);
+    /// #
+    /// #     loop {
+    /// #         match rustls_pemfile::read_one(&mut reader).expect("cannot parse private key .pem file") {
+    /// #             Some(rustls_pemfile::Item::RSAKey(key)) => return rustls::PrivateKey(key),
+    /// #             Some(rustls_pemfile::Item::PKCS8Key(key)) => return rustls::PrivateKey(key),
+    /// #             Some(rustls_pemfile::Item::ECKey(key)) => return rustls::PrivateKey(key),
+    /// #             None => break,
+    /// #             _ => {}
+    /// #         }
+    /// #      }
+    /// #
+    /// #      panic!(
+    /// #         "no keys found in {:?} (encrypted keys not supported)",
+    /// #         filename
+    /// #      );
+    /// #   }
+    /// #
+    /// #   async fn load_cert_from_disk() -> swish::SwishCertificate {
+    /// #     swish::SwishCertificate::from_der(load_private_key("Swish_Merchant_TestCertificate_1234679304.key"), load_certs("Swish_Merchant_TestCertificate_1234679304.pem"))
+    /// #   }
+    /// # tokio_test::block_on(async {
+    /// # let server_cert = load_certs("Swish_TLS_RootCA.pem").into_iter().next().expect("The provided root ca should have a cert");
+    /// # let private_cert = load_cert_from_disk().await;
+    /// let swish_client = swish::Swish::build("https://mss.cpc.getswish.net/swish-cpcapi",
+    ///                 private_cert,
+    ///                 &server_cert,
+    ///                 "1234679304");
+    ///
+    /// let response = swish_client.create_m_commerce_payment_request("0902D12C7FAE43D3AAAC49622AA79FEF", swish::PaymentRequestMCommerceParams {
+    ///     amount: swish::PaymentAmount::from(100, 00).unwrap(),
+    ///     currency: swish::Currency::Sek,
+    ///     callback_url: swish::CallbackUrl::new("https://myhost.net/swish-callback").unwrap(),
+    ///     payee_payment_reference: None,
+    ///     message: None,
+    /// }).await;
+    /// # })
+    /// ```
+    pub async fn create_m_commerce_payment_request(&self, instruction_uuid: &str, request: PaymentRequestMCommerceParams) -> Result<PaymentResponseMCommerce, CreatePaymentRequestError> {
         let req  = self.client
             .put(format!("{}/api/v2/paymentrequests/{}", self.base, instruction_uuid))
             .json(&PaymentRequest {
@@ -98,28 +170,48 @@ impl Swish {
             })
             .send()
             .await
-            .map_err(HttpError)?;
+            .map_err(CreatePaymentRequestError::HttpError)?;
 
         match req.status() {
             StatusCode::CREATED => {
                 let headers = req.headers();
 
                 return Ok(PaymentResponseMCommerce {
-                    location: headers["Location"].to_str().unwrap().to_string().parse().unwrap(),
-                    payment_request_token: headers["PaymentRequestToken"].to_str().unwrap().to_string(),
+                    location: headers["Location"].to_str().expect("Should contain a string").to_string().parse().expect("Should contain a url"),
+                    payment_request_token: headers["PaymentRequestToken"].to_str().expect("Should contain a string").to_string(),
                 })
             }
-            StatusCode::UNAUTHORIZED => Err(Unauthorized),
-            StatusCode::FORBIDDEN => Err(CertMismatch),
-            StatusCode::INTERNAL_SERVER_ERROR => Err(ServerError),
+            StatusCode::UNAUTHORIZED => Err(CreatePaymentRequestError::Unauthorized),
+            StatusCode::FORBIDDEN => Err(CreatePaymentRequestError::CertMismatch),
+            StatusCode::INTERNAL_SERVER_ERROR => Err(CreatePaymentRequestError::ServerError),
             StatusCode::UNPROCESSABLE_ENTITY => {
-                let res = req.json::<Vec<CreatePaymentRequestErrorResponse>>().await.map_err(HttpError)?;
-                Err(ValidationError(res.into_iter().map(|f| f.error_code).collect()))
+                let res = req.json::<Vec<CreatePaymentRequestErrorResponse>>().await.map_err(CreatePaymentRequestError::HttpError)?;
+                Err(CreatePaymentRequestError::ValidationError(res.into_iter().map(|f| f.error_code).collect()))
             },
-            _ => panic!("unexpected status code")
+            s => panic!("unexpected status code: {}", s)
+        }
+    }
+
+    /// Fetches the status of a swish order
+    pub async fn fetch_payment_request(&self, instruction_uuid: &str) -> Result<SwishOrder, FetchPaymentRequestError> {
+        let req  = self.client
+            .get(format!("{}/api/v1/paymentrequests/{}", self.base, instruction_uuid))
+            .send()
+            .await
+            .map_err(FetchPaymentRequestError::HttpError)?;
+
+        match req.status() {
+            StatusCode::OK => {
+                return Ok(req.json::<SwishOrder>().await.map_err(FetchPaymentRequestError::HttpError)?)
+            }
+            StatusCode::UNAUTHORIZED => Err(FetchPaymentRequestError::Unauthorized),
+            StatusCode::FORBIDDEN => Err(FetchPaymentRequestError::CertMismatch),
+            StatusCode::INTERNAL_SERVER_ERROR => Err(FetchPaymentRequestError::ServerError),
+            s => panic!("unexpected status code: {}", s)
         }
     }
 }
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Debug)]
@@ -137,18 +229,34 @@ pub enum CreatePaymentRequestError {
     CertMismatch,
     ServerError,
 }
+
+#[derive(Debug)]
+pub enum FetchPaymentRequestError {
+    HttpError(reqwest::Error),
+    // the server does not think the cert is valid
+    Unauthorized,
+    // the number listed on the cert does not correspond with the number in the request
+    CertMismatch,
+    ServerError,
+}
 /// Because Swish is super picky about the payment id format, a helper method is optionality provided to use
+/// uses `uuid` under the hood to generate a sting in the format:
+/// ```
+/// use swish::generate_payment_reference;
+/// let swish_compatible_id = generate_payment_reference();
+/// ```
 #[cfg(feature = "gen_pay_ref")]
 pub fn generate_payment_reference() -> String {
     uuid::Uuid::new_v4().to_string().replace('-', "").to_uppercase()
 }
 
+/// Represents the available params for initializing a payment request using the M-Commerce flow
 pub struct PaymentRequestMCommerceParams {
-    amount: PaymentAmount,
-    currency: Currency,
-    callback_url: CallbackUrl,
-    payee_payment_reference: String,
-    message: String
+    pub amount: PaymentAmount,
+    pub currency: Currency,
+    pub callback_url: CallbackUrl,
+    pub payee_payment_reference: Option<String>,
+    pub message: Option<String>
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -157,26 +265,30 @@ struct PaymentRequest<'a> {
     amount: PaymentAmount,
     currency: Currency,
     callback_url: CallbackUrl,
-    payee_payment_reference: String,
-    message: String
+    payee_payment_reference: Option<String>,
+    message: Option<String>
 }
 
+/// The response of [`Swish::create_m_commerce_payment_request`] when successful
+/// contains the location of where the order can be fetched using the [`Swish::fetch_payment_request`]
+/// and the "auto-start token" of the order
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Debug)]
 pub struct PaymentResponseMCommerce {
-    location: Url,
-    payment_request_token: String
+    pub location: Url,
+    pub payment_request_token: String
 }
 
+/// A callback url, only supports HTTPS based urls.
 #[derive(Deserialize, Serialize)]
 #[serde(transparent)]
 pub struct CallbackUrl(Url);
 
 impl CallbackUrl {
-    pub fn new(value: String) -> Result<CallbackUrl, CallbackUrlError> {
+    pub fn new(value: impl AsRef<str>) -> Result<CallbackUrl, CallbackUrlError> {
         let url = Url::parse(
-            &value
+            value.as_ref()
         ).map_err(UrlParseError)?;
 
         if url.scheme() != "https" {
@@ -190,31 +302,33 @@ pub enum CallbackUrlError {
     UrlSchemeNotHttps,
     UrlParseError(ParseError),
 }
-
-#[derive(Deserialize, Serialize, Debug, PartialEq)]
+/// A payment amount in the range 0.01..1000000000000
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, PartialOrd)]
 #[serde(transparent)]
 pub struct PaymentAmount(f64);
 
 impl PaymentAmount {
-    pub fn from(whole: u64, part: u8) -> Option<PaymentAmount> {
-        if part > 99 {
+    pub fn from(integer: u64, fraction: u8) -> Option<PaymentAmount> {
+        if fraction > 99 {
             return None
         }
-        if whole > 999999999999 {
+        if integer > 999999999999 {
             return None
         }
-        if whole == 0 && part == 0 {
+        if integer == 0 && fraction == 0 {
             return None
         }
-        Some(PaymentAmount(((whole * 100 + part as u64) / 100) as f64))
+        Some(PaymentAmount(((integer * 100 + fraction as u64) / 100) as f64))
     }
 }
 
+/// Supported currencies for swish
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Currency {
     Sek
 }
+/// The status of a [`SwishOrder`]
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Status {
@@ -223,31 +337,32 @@ pub enum Status {
     Declined,
     Pending,
 }
-
+/// A swish order.
 #[derive(Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct CallbackResponse {
-    id: String,
-    payee_payment_reference: String,
-    payment_reference: String,
-    callback_url: Url,
-    payer_alias: String,
-    payee_alias: String,
-    amount: PaymentAmount,
-    currency: Currency,
-    message: String,
-    status: Status,
+pub struct SwishOrder {
+    pub id: String,
+    pub payee_payment_reference: String,
+    pub payment_reference: String,
+    pub callback_url: Url,
+    pub payer_alias: String,
+    pub payee_alias: String,
+    pub amount: PaymentAmount,
+    pub currency: Currency,
+    pub message: String,
+    pub status: Status,
     #[serde(with = "time::serde::iso8601")]
-    date_created: OffsetDateTime,
+    pub date_created: OffsetDateTime,
     #[serde(with = "time::serde::iso8601::option")]
-    date_paid: Option<OffsetDateTime>,
-    error_code: Option<ApiError>,
-    error_message: Option<String>
+    pub date_paid: Option<OffsetDateTime>,
+    pub error_code: Option<ApiError>,
+    pub error_message: Option<String>
 }
 
-/// all possible error codes
+/// All possible error codes from swish that have been encountered
 #[derive(Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "UPPERCASE")]
+#[non_exhaustive]
 pub enum ApiError {
     FF08,
     RP03,
@@ -275,6 +390,7 @@ pub enum ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
     use axum::{extract, Router};
     use axum::routing::{post};
     use ngrok::config::TunnelBuilder;
@@ -283,56 +399,116 @@ mod tests {
     use crate::Status::Paid;
     use super::*;
 
+    fn load_certs(filename: &str) -> Vec<Certificate> {
+        let certfile = std::fs::File::open(filename).expect("cannot open certificate file");
+        let mut reader = std::io::BufReader::new(certfile);
+        rustls_pemfile::certs(&mut reader)
+            .unwrap()
+            .iter()
+            .map(|v| Certificate(v.clone()))
+            .collect()
+    }
+
+    fn load_private_key(filename: &str) -> PrivateKey {
+        let keyfile = std::fs::File::open(filename).expect("cannot open private key file");
+        let mut reader = std::io::BufReader::new(keyfile);
+
+        loop {
+            match rustls_pemfile::read_one(&mut reader).expect("cannot parse private key .pem file") {
+                Some(rustls_pemfile::Item::RSAKey(key)) => return rustls::PrivateKey(key),
+                Some(rustls_pemfile::Item::PKCS8Key(key)) => return rustls::PrivateKey(key),
+                Some(rustls_pemfile::Item::ECKey(key)) => return rustls::PrivateKey(key),
+                None => break,
+                _ => {}
+            }
+        }
+
+        panic!(
+            "no keys found in {:?} (encrypted keys not supported)",
+            filename
+        );
+    }
+
+    async fn load_cert_from_disk() -> SwishCertificate {
+        SwishCertificate::from_der(load_private_key("Swish_Merchant_TestCertificate_1234679304.key"), load_certs("Swish_Merchant_TestCertificate_1234679304.pem"))
+    }
+
     async fn get_client_for_test() -> Swish {
-        Swish::build("https://mss.cpc.getswish.net/swish-cpcapi".into(),
-                     SwishCertificate::from_der("Swish_Merchant_TestCertificate_1234679304.key",
-                                                "Swish_Merchant_TestCertificate_1234679304.pem"),
-                     "1234679304".to_string())
+        Swish::build("https://mss.cpc.getswish.net/swish-cpcapi",
+                     load_cert_from_disk().await,
+                     load_certs("Swish_TLS_RootCA.pem").first().expect("The provided root ca should have a cert"),
+                     "1234679304")
     }
 
     #[tokio::test]
-    async fn it_works() {
+    async fn payment_request_can_be_issued() {
         let uuid = generate_payment_reference();
         let swish = get_client_for_test().await;
-        let res = swish.create_payment_request(uuid, PaymentRequestMCommerceParams {
+        let res = swish.create_m_commerce_payment_request(&uuid, PaymentRequestMCommerceParams {
             amount: PaymentAmount::from(100, 00).unwrap(),
             currency: Currency::Sek,
             callback_url: CallbackUrl::new("https://localhost/test".to_string()).unwrap(),
-            payee_payment_reference: "eee".to_string(),
-            message: "eee".to_string(),
+            payee_payment_reference: Some("eee".to_string()),
+            message: Some("eee".to_string()),
         }).await.unwrap();
 
         assert_eq!(res.location.host().unwrap().to_string(), "mss.cpc.getswish.net");
         assert!(!res.payment_request_token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn it_works_using_polling() {
+        let uuid = generate_payment_reference();
+        let swish = get_client_for_test().await;
+        swish.create_m_commerce_payment_request(&uuid, PaymentRequestMCommerceParams {
+            amount: PaymentAmount::from(100, 00).unwrap(),
+            currency: Currency::Sek,
+            callback_url: CallbackUrl::new("https://localhost/test".to_string()).unwrap(),
+            payee_payment_reference: Some("ref".to_string()),
+            message: Some("msg".to_string()),
+        }).await.unwrap();
+
+        tokio::time::sleep(Duration::from_secs(4)).await; // the test env takes about 4 seconds to get the status to paid
+
+        let res = swish.fetch_payment_request(&uuid).await.expect("Should have a response");
+
+        assert_eq!(res.error_message, None);
+        assert_eq!(res.amount, PaymentAmount::from(100, 00).unwrap());
+        assert_eq!(res.currency, Currency::Sek);
+        assert_eq!(&res.id, &uuid);
+        assert_eq!(res.payee_payment_reference, "ref");
+        assert_eq!(res.status, Paid);
+        assert_eq!(res.message, "msg");
     }
     // This sort of testes the simulator, but we use it to make sure we can parse the error response
     #[tokio::test]
     async fn it_errors() {
         let uuid = generate_payment_reference();
         let swish = get_client_for_test().await;
-        let res = swish.create_payment_request(uuid, PaymentRequestMCommerceParams {
+        let res = swish.create_m_commerce_payment_request(&uuid, PaymentRequestMCommerceParams {
             amount: PaymentAmount::from(100, 00).unwrap(),
             currency: Currency::Sek,
             callback_url: CallbackUrl::new("https://localhost/test".to_string()).unwrap(),
-            payee_payment_reference: "eee".to_string(),
-            message: "ACMT03".to_string(),
+            payee_payment_reference: Some("eee".to_string()),
+            message: Some("ACMT03".to_string()),
         }).await;
 
-        let Err(ValidationError(e)) = res else { panic!("should error"); };
+        let Err(CreatePaymentRequestError::ValidationError(e)) = res else { panic!("should error"); };
 
         assert_eq!(e.iter().next(), Some(&ApiError::ACMT03));
     }
 
-    // this test sets up a http server, exposes it via ngrock (it seems to work without credentials too),
+    // this test sets up a https server, exposes it via ngrock (it seems to work without credentials too),
     // and calls the api, expecting to be called back from the server via this temp connection.
     #[tokio::test]
     async fn it_calls_back() {
         let (sender, mut receiver) = channel(100);
         let join_handle = tokio::spawn(async move {
             let (tx, mut rx) = channel(1);
-            let app = Router::new().route("/", post(|extract::Json(payload) : extract::Json<CallbackResponse>| async move {
+            let app = Router::new().route("/", post(|extract::Json(payload) : extract::Json<SwishOrder>| async move {
                 tx.send(()).await.unwrap();
 
+                println!("{:?}", payload);
                 // this will just panic a runtime thread of axum, so not ideal for asserting this stuff
                 assert_eq!(payload.error_code, None);
                 assert_eq!(payload.status, Paid);
@@ -367,12 +543,12 @@ mod tests {
                 Some(url) => {
                     let uuid = generate_payment_reference();
                     let swish = get_client_for_test().await;
-                    swish.create_payment_request(uuid, PaymentRequestMCommerceParams {
+                    swish.create_m_commerce_payment_request(&uuid, PaymentRequestMCommerceParams {
                         amount: PaymentAmount::from(100, 00).unwrap(),
                         currency: Currency::Sek,
                         callback_url: CallbackUrl::new(url).unwrap(),
-                        payee_payment_reference: "eee".to_string(),
-                        message: "eee".to_string(),
+                        payee_payment_reference: Some("eee".to_string()),
+                        message: Some("eee".to_string()),
                     }).await.unwrap();
                 }
             }
