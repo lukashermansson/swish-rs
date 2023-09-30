@@ -101,51 +101,53 @@ pub enum InvalidSwishResponse {
     LocationNotValidUrl(ParseError),
     NotValidUtf8Response(ToStrError)
 }
-#[derive(Deserialize, Debug, PartialEq)]
-#[serde(rename_all = "UPPERCASE")]
-#[non_exhaustive]
-pub enum PaymentRefundError {
 
-    /// PaymentReference is invalid.
-    FF08,
-    /// Callback URL is missing or does not use HTTPS.
-    RP03,
-    /// Amount value is missing or not a valid number.
-    PA02,
-    /// Invalid or missing Currency.
-    AM03,
-    /// Insufficient funds in account.
-    AM04,
-    /// Specified transaction amount is less than agreed minimum.
-    AM06,
-    /// Missing Merchant Swish Number.
-    RP01,
-    /// Wrong formatted message.
-    RP02,
-    /// Payee not Enrolled.
-    ACMT07,
-    /// Counterpart is not activated.
-    ACMT01,
-    /// Original Payment not found or original payment is more than 13 months old.
-    RF02,
-    /// Payer alias in the refund does not match the payee alias in the original payment.
-    RF03,
-    /// Payer organization number do not match original payment payee organization number.
-    RF04,
-    /// The Payer SSN in the original payment is not the same as the SSN for the current Payee. Note: Typically, this means that the Mobile number has been transferred to another person.
-    RF06,
-    /// Transaction declined.
-    RF07,
-    /// Amount value is too large, or amount exceeds the amount of the original payment minus any previous refunds. Note: the remaining available amount is put into the additional information field.
-    RF08,
-    /// Refund already in progress.
-    RF09,
-    /// The given instructionUUID is not available Note: The instructionUUID already exist in the database, i.e. it is not unique.
-    RP09,
-    /// Bank system processing error.
-    FF10,
-    /// Payer alias is invalid.
-    BE18,
+macro_rules! api_error {
+    ($($name: ident => $description: expr,)+) => {
+        /// All possible error codes from swish when dealing with refunds
+        #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        #[non_exhaustive]
+        pub enum PaymentRefundError {
+                $(
+                #[doc = $description]
+                $name,
+                )+
+        }
+        impl std::error::Error for PaymentRefundError {}
+
+        impl std::fmt::Display for PaymentRefundError {
+            fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match *self {
+                    $(
+                        ApiError::$name => fmt.write_str($description),
+                    )+
+                }
+            }
+        }
+    }
+}
+
+api_error! {
+    FF08 => "PaymentReference is invalid.",
+    RP03 => "Callback URL is missing or does not use HTTPS.",
+    PA02 => "Amount value is missing or not a valid number.",
+    AM03 => "Invalid or missing Currency.",
+    AM04 => "Insufficient funds in account.",
+    AM06 => "Specified transaction amount is less than agreed minimum.",
+    RP01 => "Missing Merchant Swish Number.",
+    RP02 => "Wrong formatted message.",
+    ACMT07 => "Payee not Enrolled.",
+    ACMT01 => "Counterpart is not activated.",
+    RF02 => "Original Payment not found or original payment is more than 13 months old.",
+    RF03 => "Payer alias in the refund does not match the payee alias in the original payment.",
+    RF04 => "Payer organization number do not match original payment payee organization number.",
+    RF06 => "The Payer SSN in the original payment is not the same as the SSN for the current Payee. Note: Typically, this means that the Mobile number has been transferred to another person.",
+    RF07 => "Transaction declined.",
+    RF08 => "Amount value is too large, or amount exceeds the amount of the original payment minus any previous refunds. Note: the remaining available amount is put into the additional information field.",
+    RF09 => "Refund already in progress.",
+    RP09 => "The given instructionUUID is not available Note: The instructionUUID already exist in the database, i.e. it is not unique.",
+    FF10 => "Bank system processing error.",
+    BE18 => "Payer alias is invalid.",
 }
 
 #[derive(Deserialize)]

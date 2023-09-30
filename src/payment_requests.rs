@@ -408,66 +408,57 @@ pub struct SwishOrder {
     pub error_message: Option<String>,
 }
 
-/// All possible error codes from swish that have been encountered
-#[derive(Deserialize, Debug, PartialEq)]
-#[serde(rename_all = "UPPERCASE")]
-#[non_exhaustive]
-pub enum ApiError {
-    FF08,
-    RP03,
-    BE18,
-    RP01,
-    PA02,
-    AM06,
-    AM02,
-    AM03,
-    RP02,
-    RP06,
-    ACMT03,
-    ACMT01,
-    ACMT07,
-    VR01,
-    VR02,
-    RP09,
-    RF07,
-    BANKIDCL,
-    FF10,
-    TM01,
-    DS24,
-    RP08,
-}
+macro_rules! api_error {
+    ($($name: ident => $description: expr,)+) => {
+        /// All possible error codes from swish when dealing with requests
+        #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        #[non_exhaustive]
+        pub enum ApiError {
+                $(
+                #[doc = $description]
+                $name,
+                )+
+        }
+        impl std::error::Error for ApiError {}
 
-impl Error for ApiError {}
-impl Display for ApiError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ApiError::FF08 => f.write_str("PaymentReference is invalid."),
-            ApiError::RP03 => f.write_str("Callback URL is missing or does not use HTTPS."),
-            ApiError::BE18 => f.write_str("Payer alias is invalid."),
-            ApiError::RP01 => f.write_str("Missing Merchant Swish Number."),
-            ApiError::PA02 => f.write_str("Amount value is missing or not a valid number."),
-            ApiError::AM02 => f.write_str("Amount value is too large."),
-            ApiError::AM03 => f.write_str("Invalid or missing Currency."),
-            ApiError::AM06 => f.write_str("Specified transaction amount is less than agreed minimum."),
-            ApiError::RP02 => f.write_str("Wrong formatted message."),
-            ApiError::RP06 => f.write_str("A payment request already exists for that payer. Only applicable for Swish e-commerce."),
-            ApiError::ACMT03 => f.write_str("Payer not Enrolled."),
-            ApiError::ACMT01 => f.write_str("Counterpart is not activated."),
-            ApiError::ACMT07 => f.write_str("Payee not Enrolled."),
-            ApiError::VR01 => f.write_str("Payer does not meet age limit."),
-            ApiError::VR02 => f.write_str("The payer alias in the request is not enroled in swish with the supplied ssn."),
-            ApiError::RP09 => f.write_str("The given instructionUUID is not available Note: The instructionUUID already exist in the database, i.e. it is not unique."),
-            ApiError::RF07 => f.write_str("Transaction declined"),
-            ApiError::BANKIDCL => f.write_str("Payer cancelled BankId signing"),
-            ApiError::FF10 => f.write_str("Bank system processing error"),
-            ApiError::TM01 => f.write_str("Swish timed out before the payment was started"),
-            ApiError::DS24 => f.write_str("Swish timed out waiting for an answer from the banks after payment was started.
-            Note: If this happens Swish has no knowledge of whether the payment
-            was successful or not. The Merchant should inform its consumer about this and
-            recommend them to check with their bank about the status of this payment."),
-            ApiError::RP08 => f.write_str("The payment request has been cancelled."),
+        impl std::fmt::Display for ApiError {
+            fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match *self {
+                    $(
+                        ApiError::$name => fmt.write_str($description),
+                    )+
+                }
+            }
         }
     }
+}
+
+api_error! {
+    FF08 => "PaymentReference is invalid.",
+    RP03 => "Callback URL is missing or does not use HTTPS.",
+    BE18 => "Payer alias is invalid.",
+    RP01 => "Missing Merchant Swish Number.",
+    PA02 => "Amount value is missing or not a valid number.",
+    AM02 => "Amount value is too large.",
+    AM03 => "Invalid or missing Currency.",
+    AM06 => "Specified transaction amount is less than agreed minimum.",
+    RP02 => "Wrong formatted message.",
+    RP06 => "A payment request already exists for that payer. Only applicable for Swish e-commerce.",
+    ACMT03 => "Payer not Enrolled.",
+    ACMT01 => "Counterpart is not activated.",
+    ACMT07 => "Payee not Enrolled.",
+    VR01 => "Payer does not meet age limit.",
+    VR02 => "The payer alias in the request is not enroled in swish with the supplied ssn.",
+    RP09 => "The given instructionUUID is not available Note: The instructionUUID already exist in the database, i.e. it is not unique.",
+    RF07 => "Transaction declined",
+    BANKIDCL => "Payer cancelled BankId signing",
+    FF10 => "Bank system processing error",
+    TM01 => "Swish timed out before the payment was started",
+    DS24 => "Swish timed out waiting for an answer from the banks after payment was started.
+    Note: If this happens Swish has no knowledge of whether the payment
+    was successful or not. The Merchant should inform its consumer about this and
+    recommend them to check with their bank about the status of this payment.",
+    RP08 => "The payment request has been cancelled.",
 }
 
 #[cfg(test)]
