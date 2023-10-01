@@ -2,8 +2,6 @@ pub mod refunds;
 mod test_util;
 pub mod payment_requests;
 
-use std::error::Error;
-use std::fmt::{Display};
 use crate::CallbackUrlError::{UrlParseError, UrlSchemeNotHttps};
 use reqwest::{Client};
 use rustls::{Certificate, PrivateKey};
@@ -129,7 +127,7 @@ pub fn generate_payment_reference() -> String {
 
 
 /// A callback url, only supports HTTPS based urls.
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(transparent)]
 pub struct CallbackUrl(Url);
 
@@ -154,7 +152,7 @@ pub enum CallbackUrlError {
 pub struct PaymentAmount(f64);
 
 impl PaymentAmount {
-    pub fn from(integer: u64, fraction: u8) -> Option<PaymentAmount> {
+    pub fn from(integer: u64, fraction: u8) -> Option<Self> {
         if fraction > 99 {
             return None;
         }
@@ -164,7 +162,7 @@ impl PaymentAmount {
         if integer == 0 && fraction == 0 {
             return None;
         }
-        Some(PaymentAmount(
+        Some(Self(
             ((integer * 100 + fraction as u64) / 100) as f64,
         ))
     }

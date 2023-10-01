@@ -1,5 +1,3 @@
-use std::error::Error;
-use std::fmt::{Display, Formatter, Write};
 use reqwest::header::{CONTENT_TYPE, ToStrError};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -229,7 +227,7 @@ impl Swish {
     pub async fn fetch_payment_request(
         &self,
         instruction_uuid: &str,
-    ) -> Result<SwishOrder, FetchPaymentRequestError> {
+    ) -> Result<PaymentOrder, FetchPaymentRequestError> {
         let req = self
             .client
             .get(format!(
@@ -243,7 +241,7 @@ impl Swish {
         match req.status() {
             StatusCode::OK => {
                 return Ok(req
-                    .json::<SwishOrder>()
+                    .json::<PaymentOrder>()
                     .await
                     .map_err(FetchPaymentRequestError::HttpError)?)
             }
@@ -257,7 +255,7 @@ impl Swish {
     pub async fn cancel_payment_request(
         &self,
         instruction_uuid: &str,
-    ) -> Result<SwishOrder, CancelPaymentRequestError> {
+    ) -> Result<PaymentOrder, CancelPaymentRequestError> {
         let req = self
             .client
             .patch(format!(
@@ -277,7 +275,7 @@ impl Swish {
         match req.status() {
             StatusCode::OK => {
                 return Ok(req
-                    .json::<SwishOrder>()
+                    .json::<PaymentOrder>()
                     .await
                     .map_err(CancelPaymentRequestError::HttpError)?)
             }
@@ -375,21 +373,22 @@ pub struct PaymentResponseECommerce {
     pub location: Url,
 }
 
-/// The status of a [`SwishOrder`]
+/// The status of a [`PaymentOrder`]
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum Status {
+pub enum PaymentStatus {
     Paid,
     Error,
     Declined,
-    Cancelled, /// this is for wehn the merchant decides to cancel the request with [`Swish::cancel_payment_request`]
+    Cancelled, /// this is for when the merchant decides to cancel the request with [`Swish::cancel_payment_request`]
     Pending,
 }
+
 /// A swish order. can be requested by [`Swish::fetch_payment_request`] for `polling` use cases
 /// can also be used when deserializing callbacks from swish
 #[derive(Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SwishOrder {
+pub struct PaymentOrder {
     pub id: String,
     pub payee_payment_reference: String,
     pub payment_reference: String,
@@ -399,7 +398,7 @@ pub struct SwishOrder {
     pub amount: PaymentAmount,
     pub currency: Currency,
     pub message: String,
-    pub status: Status,
+    pub status: PaymentStatus,
     #[serde(with = "time::serde::iso8601")]
     pub date_created: OffsetDateTime,
     #[serde(with = "time::serde::iso8601::option")]
@@ -407,11 +406,11 @@ pub struct SwishOrder {
     pub error_code: Option<ApiError>,
     pub error_message: Option<String>,
 }
-
 macro_rules! api_error {
     ($($name: ident => $description: expr,)+) => {
         /// All possible error codes from swish when dealing with requests
         #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        #[derive(Deserialize)]
         #[non_exhaustive]
         pub enum ApiError {
                 $(
@@ -471,7 +470,7 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc::channel;
     use crate::generate_payment_reference;
-    use crate::payment_requests::Status::Paid;
+    use crate::payment_requests::PaymentStatus::Paid;
     use crate::test_util::tests::{load_cert_from_disk, load_server_ca};
 
     async fn get_client_for_test() -> Swish {
@@ -530,7 +529,7 @@ mod tests {
 
         assert_eq!(
             res.status,
-            Status::Cancelled
+            PaymentStatus::Cancelled
         );
     }
 
@@ -637,7 +636,7 @@ mod tests {
             let app = Router::new().route(
                 "/",
                 post(
-                    |extract::Json(payload): extract::Json<SwishOrder>| async move {
+                    |extract::Json(payload): extract::Json<PaymentOrder>| async move {
                         tx.send(()).await.unwrap();
 
                         println!("{:?}", payload);

@@ -1,6 +1,7 @@
 use reqwest::header::ToStrError;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use url::{ParseError, Url};
 use crate::{CallbackUrl, Currency, PaymentAmount, Swish};
 
@@ -44,27 +45,55 @@ impl Swish {
 
                 });
             }
-            StatusCode::UNAUTHORIZED => Err(CreateRefundRequestError::Unauthorized),
+            StatusCode::UNAUTHORIZED =>Err(CreateRefundRequestError::Unauthorized),
             StatusCode::FORBIDDEN => Err(CreateRefundRequestError::CertMismatch),
             StatusCode::INTERNAL_SERVER_ERROR => Err(CreateRefundRequestError::ServerError),
             StatusCode::UNPROCESSABLE_ENTITY => {
                 let res = req
                     .json::<Vec<CreateRefundRequestErrorResponse>>()
-                    .await
-                    .map_err(CreateRefundRequestError::HttpError)?;
-                Err(CreateRefundRequestError::ValidationError(
-                    res.into_iter().map(|f| f.error_code).collect(),
+                     .await
+                     .map_err(CreateRefundRequestError::HttpError)?;
+                 Err(CreateRefundRequestError::ValidationError(
+                    res
                 ))
             }
             s => panic!("unexpected status code: {}", s),
         }
     }
+    pub async fn retrieve_refund(
+        &self,
+        instruction_uuid: &str,
+    ) -> Result<RefundOrder, RetriveRefundRequestError> {
+        let req = self
+            .client
+            .get(format!(
+                "{}/api/v1/refunds/{}",
+                self.base, instruction_uuid
+            ))
+            .send()
+            .await
+            .map_err(RetriveRefundRequestError::HttpError)?;
+
+        match req.status() {
+            StatusCode::OK => {
+                return Ok(req
+                    .json::<RefundOrder>()
+                    .await
+                    .map_err(RetriveRefundRequestError::HttpError)?)
+            }
+            StatusCode::UNAUTHORIZED => Err(RetriveRefundRequestError::Unauthorized),
+            StatusCode::INTERNAL_SERVER_ERROR => Err(RetriveRefundRequestError::ServerError),
+            StatusCode::NOT_FOUND => Err(RetriveRefundRequestError::NotFound),
+            s => panic!("unexpected status code: {}", s),
+        }
+    }
 }
 
+#[derive(Debug)]
 pub struct PaymentResponseSuccessfullResponse {
     pub location: Url,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct RefundRequest {
     pub amount: PaymentAmount,
@@ -76,6 +105,7 @@ struct RefundRequest {
     pub message: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct RefundRequestParams {
     pub amount: PaymentAmount,
     pub original_payment_reference: String,
@@ -87,13 +117,21 @@ pub struct RefundRequestParams {
 #[derive(Debug)]
 pub enum CreateRefundRequestError {
     // represents all kind of validation errors
-    ValidationError(Vec<PaymentRefundError>),
+    ValidationError(Vec<CreateRefundRequestErrorResponse>),
     InvalidSwishResponse(InvalidSwishResponse),
     HttpError(reqwest::Error),
     // the server does not think the cert is valid
     Unauthorized,
     // the number listed on the cert does not correspond with the number in the request
     CertMismatch,
+    ServerError,
+}
+#[derive(Debug)]
+pub enum RetriveRefundRequestError {
+    HttpError(reqwest::Error),
+    // the server does not think the cert is valid
+    Unauthorized,
+    NotFound,
     ServerError,
 }
 #[derive(Debug)]
@@ -106,20 +144,21 @@ macro_rules! api_error {
     ($($name: ident => $description: expr,)+) => {
         /// All possible error codes from swish when dealing with refunds
         #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        #[derive(Deserialize)]
         #[non_exhaustive]
-        pub enum PaymentRefundError {
+        pub enum PaymentRefundErrorType {
                 $(
                 #[doc = $description]
                 $name,
                 )+
         }
-        impl std::error::Error for PaymentRefundError {}
+        impl std::error::Error for PaymentRefundErrorType {}
 
-        impl std::fmt::Display for PaymentRefundError {
+        impl std::fmt::Display for PaymentRefundErrorType {
             fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match *self {
                     $(
-                        ApiError::$name => fmt.write_str($description),
+                        PaymentRefundErrorType::$name => fmt.write_str($description),
                     )+
                 }
             }
@@ -148,14 +187,77 @@ api_error! {
     RP09 => "The given instructionUUID is not available Note: The instructionUUID already exist in the database, i.e. it is not unique.",
     FF10 => "Bank system processing error.",
     BE18 => "Payer alias is invalid.",
+    BANKIDCL => "Payer cancelled BankId signing",
+    DS24 => "Swish timed out waiting for an answer from the banks after payment was started. Note: If this happens Swish has no knowledge of whether the payment was successful or not. The Merchant should inform its consumer about this and recommend them to check with their bank about the status of this payment.",
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Debug)]
-struct CreateRefundRequestErrorResponse {
-    error_code: PaymentRefundError,
+pub struct CreateRefundRequestErrorResponse {
+    pub error_code: PaymentRefundErrorType,
+    pub additional_information: Option<String>,
 }
+
+
+/// The status of a [`RefundOrder`]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum RefundStatus {
+    Created,
+    Validated, /// refund ongoing
+    Debited, /// Money has been withdrawn from your account
+    Paid, /// The payment was sucessful
+    Error,
+}
+
+/// A swish order. can be requested by [`Swish::fetch_payment_request`] for `polling` use cases
+/// can also be used when deserializing callbacks from swish
+#[derive(Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RefundOrder {
+    pub id: String,
+    pub payer_payment_reference: String,
+    pub original_payment_reference: String,
+    pub payment_reference: Option<String>,
+    pub callback_url: Url,
+    pub payer_alias: String,
+    pub amount: RefundPaymentAmount,
+    pub currency: Currency,
+    pub message: Option<String>,
+    pub status: RefundStatus,
+    #[serde(with = "time::serde::iso8601")]
+    pub date_created: OffsetDateTime,
+    #[serde(with = "time::serde::iso8601::option")]
+    pub date_paid: Option<OffsetDateTime>,
+    pub error_code: Option<PaymentRefundErrorType>,
+    pub error_message: Option<String>,
+    /// only applicable for errors
+    pub additional_information: Option<String>,
+}
+
+/// A payment amount in the range 1..1000000000000
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, PartialOrd)]
+#[serde(transparent)]
+pub struct RefundPaymentAmount(f64);
+
+impl RefundPaymentAmount {
+    pub fn from(integer: u64, fraction: u8) -> Option<Self> {
+        if fraction > 99 {
+            return None;
+        }
+        if integer > 999999999999 {
+            return None;
+        }
+        if integer == 0 {
+            return None;
+        }
+        Some(Self(
+            ((integer * 100 + fraction as u64) / 100) as f64,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,15 +276,10 @@ mod tests {
             "1234679304",
         )
     }
-
-    #[tokio::test]
-    async fn refund_request_can_be_issued() {
-        let original_payment_ref = generate_payment_reference();
-        let swish = get_client_for_test().await;
-        // set up an order to be redunded
+    async fn create_payment_to_be_refunded(swish : &Swish, payment_ref: &str) {
         swish
             .create_m_commerce_payment_request(
-                &original_payment_ref,
+                &payment_ref,
                 PaymentRequestMCommerceParams {
                     amount: PaymentAmount::from(100, 00).unwrap(),
                     currency: Currency::Sek,
@@ -193,6 +290,14 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn refund_request_can_be_issued() {
+        let original_payment_ref = generate_payment_reference();
+        let swish = get_client_for_test().await;
+        // set up an order to be refunded
+        create_payment_to_be_refunded(&swish, &original_payment_ref).await;
 
         let refund_uuid = generate_payment_reference();
         let res = swish.create_refund_request(&refund_uuid, RefundRequestParams {
@@ -205,5 +310,58 @@ mod tests {
         }).await.unwrap();
 
         assert!(res.location.has_host())
+    }
+    #[tokio::test]
+    async fn refund_request_can_be_fetched() {
+        let original_payment_ref = generate_payment_reference();
+        let swish = get_client_for_test().await;
+        // set up an order to be refunded
+        create_payment_to_be_refunded(&swish, &original_payment_ref).await;
+
+
+        let refund_uuid = generate_payment_reference();
+        swish.create_refund_request(&refund_uuid, RefundRequestParams {
+            amount: PaymentAmount::from(100, 00).unwrap(),
+            original_payment_reference: original_payment_ref.clone(),
+            currency: Currency::Sek,
+            callback_url: CallbackUrl::new("https://localhost/test".to_string()).unwrap(),
+            payer_payment_reference: None,
+            message: None,
+        }).await.unwrap();
+
+        let res = swish.retrieve_refund(&refund_uuid).await.unwrap();
+        assert_eq!(res.original_payment_reference, original_payment_ref);
+        assert_eq!(res.id, refund_uuid);
+        assert_eq!(res.payer_payment_reference, "");
+        assert_eq!(res.payment_reference, None);
+        assert_eq!(&res.amount, &RefundPaymentAmount::from(100, 00).unwrap());
+        assert_eq!(res.status, RefundStatus::Created);
+        assert_eq!(res.date_paid, None);
+        assert_eq!(res.error_code, None);
+        assert_eq!(res.error_message, None);
+        assert_eq!(res.additional_information, None);
+    }
+    #[tokio::test]
+    async fn refund_requests_gets_errors() {
+        let original_payment_ref = generate_payment_reference();
+        let swish = get_client_for_test().await;
+        // set up an order to be refunded
+        create_payment_to_be_refunded(&swish, &original_payment_ref).await;
+
+        let refund_uuid = generate_payment_reference();
+        let res = swish.create_refund_request(&refund_uuid, RefundRequestParams {
+            amount: PaymentAmount::from(100, 00).unwrap(),
+            original_payment_reference: original_payment_ref,
+            currency: Currency::Sek,
+            callback_url: CallbackUrl::new("https://localhost/test".to_string()).unwrap(),
+            payer_payment_reference: None,
+            message: Some("RF08".to_string()),
+        }).await;
+
+        let vec = vec!(CreateRefundRequestErrorResponse {
+            error_code: PaymentRefundErrorType::RF08,
+            additional_information: None
+        });
+        assert!(matches!(res, Err(CreateRefundRequestError::ValidationError(vec))));
     }
 }
