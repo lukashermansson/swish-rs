@@ -1,3 +1,5 @@
+![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/lukashermansson/swish-rs/rust.yml)
+
 # Swish-rs
 Swish-rs is a library for interacting with the swish payment service in **Rust**
 
