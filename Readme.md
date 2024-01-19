@@ -1,6 +1,5 @@
-# Swish api wrapper
-
-This is an api wrapper for the swish payment service
+# Swish-rs
+Swish-rs is a library for interacting with the swish payment service in **Rust**
 
 ## Testing the callback
 
@@ -13,5 +12,6 @@ if you want to run the tests and may need that key, you can set up your key at [
 
 and configure an env variable `NGROK_AUTHTOKEN="{token}"`
 
-
+## Implementation status
+The featureset of this library is not yet complete, once its fully featured I'm lookign to release this on [crates.io](https://crates.io/)
 
